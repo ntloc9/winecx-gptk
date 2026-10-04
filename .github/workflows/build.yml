@@ -95,7 +95,7 @@ jobs:
     outputs:
       runtime_version: ${{ steps.install.outputs.runtime_version }}
       shippable: ${{ steps.make.outputs.shippable }}
-    runs-on: ${{ inputs.runner == 'hosted' && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    runs-on: ${{ (github.event_name == 'push' || inputs.runner == 'hosted') && fromJSON('["macos-15"]') || fromJSON('["self-hosted","macOS","ARM64"]') }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -232,14 +232,14 @@ jobs:
 
           outs=""
           # ffmpeg-headless, not ffmpeg: winedmo wants libavutil, libavformat
-          # and libavcodec and nothing else, and the full build drags in SDL
-          # and an x11 closure that would be bundled along with it
+          # and libavcodec and nothing else. SDL2 is included explicitly for
+          # winebus without dragging in the full ffmpeg package's x11 closure.
           # glib and orc are pulled in by name because pkg-config resolves
           # gstreamer-1.0.pc's Requires: through PKG_CONFIG_PATH and nothing
           # here reads nixpkgs' propagated-build-inputs, so without them the
           # gstreamer probe fails on a missing glib-2.0 and configure quietly
           # drops winegstreamer
-          for p in freetype gnutls libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp vulkan-headers ffmpeg-headless \
+          for p in freetype gnutls SDL2 libpng zlib brotli bzip2 nettle libtasn1 libidn2 p11-kit libunistring gmp vulkan-headers ffmpeg-headless \
                    glib orc \
                    gst_all_1.gstreamer gst_all_1.gst-plugins-base gst_all_1.gst-plugins-good \
                    gst_all_1.gst-plugins-bad gst_all_1.gst-libav; do
@@ -407,6 +407,16 @@ jobs:
             exit 1
           }
           echo "gstreamer: found"
+
+          # On macOS the IOHID backend deliberately leaves ordinary gamepads
+          # to SDL. Shipping winebus without SDL therefore detects controllers
+          # and then discards them, leaving joy.cpl and XInput empty.
+          grep -q '^#define SONAME_LIBSDL2 ' include/config.h || {
+            echo "::error::SDL2 was not found; winebus would discard ordinary macOS gamepads"
+            grep -i 'sdl2\|SDL.h' config.log | tail -20
+            exit 1
+          }
+          echo "SDL2: found"
 
       - name: make
         id: make
@@ -664,7 +674,7 @@ jobs:
           scan() { otool -L "$1" 2>/dev/null | awk '/\/nix\/store/{print $1}'; }
 
           # two kinds of dependency, and only one of them is discoverable.
-          # freetype and gnutls are dlopened by soname so they never
+          # freetype, gnutls and SDL2 are dlopened by soname so they never
           # appear in a load command: they have to be named. everything the
           # unix modules link against directly (ffmpeg, and whatever it drags
           # in) does appear, so seed from the tree itself rather than from a
@@ -699,7 +709,7 @@ jobs:
 
           queue=""
           for d in $(cat store-outs.txt); do
-            for so in libfreetype.6.dylib libgnutls.30.dylib; do
+            for so in libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib; do
               [ -f "$d/lib/$so" ] && queue="$queue $d/lib/$so"
             done
           done
@@ -724,6 +734,11 @@ jobs:
           done
 
           phase "nix closure walk"
+
+          [ -f "$LIBDIR/libSDL2-2.0.0.dylib" ] || {
+            echo "::error::SDL2 was configured but its runtime dylib was not bundled"
+            exit 1
+          }
 
           # two iconvs are needed and they are not interchangeable: _iconv is
           # only in macOS's /usr/lib copy, _libiconv only in nix's. ask each
